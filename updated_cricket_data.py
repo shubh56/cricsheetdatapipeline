@@ -15,7 +15,7 @@ def run_pipeline():
         print("Error: DB_URL secret not found.")
         return
 
-    engine = create_engine(DB_URL)
+    engine = create_engine(DB_URL, connect_args={'connect_timeout': 10})
     
     # 1. Get existing Match IDs from the DB to avoid duplicates
     try:
@@ -84,4 +84,5 @@ def run_pipeline():
     print("Upload complete!")
 
 if __name__ == "__main__":
+
     run_pipeline()

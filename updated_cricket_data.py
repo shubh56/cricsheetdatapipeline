@@ -6,7 +6,7 @@ import io
 from sqlalchemy import create_engine
 import os
 
-# Get DB URL from GitHub Secrets
+# Use environment variables for security (Set DB_URL in GitHub Secrets)
 DB_URL = os.getenv('DB_URL')
 CRICSHEET_URL = "https://cricsheet.org/downloads/all_json.zip"
 
@@ -15,19 +15,20 @@ def run_pipeline():
         print("Error: DB_URL secret not found.")
         return
 
+    # Connection pooling fix for cloud runners
     engine = create_engine(DB_URL, connect_args={'connect_timeout': 10})
     
-    # 1. Get existing Match IDs from the DB to avoid duplicates
+    # 1. Check database for existing matches to avoid duplicates
     try:
         existing_ids = pd.read_sql("SELECT match_id FROM matches", engine)['match_id'].tolist()
-        print(f"Database currently has {len(existing_ids)} matches.")
+        print(f"Database contains {len(existing_ids)} matches.")
     except Exception:
         existing_ids = []
-        print("Matches table not found. Starting fresh.")
+        print("Starting fresh upload.")
 
-    # 2. Download Cricsheet data in memory
-    print("Fetching latest zip from Cricsheet...")
-    r = requests.get(CRICSHEET_URL)
+    # 2. Download zip from Cricsheet
+    print("Fetching data from Cricsheet...")
+    r = requests.get(CRICSHEET_URL, timeout=60)
     z = zipfile.ZipFile(io.BytesIO(r.content))
     
     # 3. Identify new matches
@@ -35,11 +36,11 @@ def run_pipeline():
     new_files = [f for f in all_json_files if f.replace('.json', '') not in existing_ids]
     
     if not new_files:
-        print("No new matches found. Script ending.")
+        print("No new data to upload.")
         return
 
-    print(f"Parsing {len(new_files)} new matches...")
-    # Limit to 500 per run to ensure we stay under the 15-min free limit
+    print(f"Parsing {len(new_files)} matches...")
+    # Limit to 500 per run to stay within GitHub free limits
     new_files = new_files[:500] 
 
     m_info, m_players, m_deliveries = [], [], []
@@ -51,38 +52,85 @@ def run_pipeline():
             info = data.get('info', {})
             if 'dates' not in info: continue
             
-            # --- Match Info ---
+            # --- RESTORED: Full Match Info Table ---
+            start_date = info['dates'][0]
+            end_date = start_date if len(info['dates']) == 1 else info['dates'][-1]
+            t1, t2 = info['teams'][0], info['teams'][1]
+            match_key = f"{start_date}_{t1}_{t2}"
+
             m_info.append({
                 'match_id': match_id,
+                'match_key': match_key,
                 'season': str(info.get('season')),
-                'date': info['dates'][0],
-                'teams': " vs ".join(info['teams']),
-                'winner': info.get('outcome', {}).get('winner', 'No Result')
+                'start_date': start_date,
+                'end_date': end_date,
+                'match_type': info.get('match_type'),
+                'match_number': info.get('event', {}).get('match_number', 'None'),
+                'event': info.get('event', {}).get('name', 'None'),
+                'city': info.get('city', 'None'),
+                'venue': info.get('venue'),
+                'home_team': t1,
+                'away_team': t2,
+                'toss_won': info.get('toss', {}).get('winner'),
+                'toss_decision': info.get('toss', {}).get('decision'),
+                'winner': info.get('outcome', {}).get('winner', info.get('outcome', {}).get('result', 'Draw/No Result')),
+                'won_by': " ".join([f"{v} {k}" for k, v in info.get('outcome', {}).get('by', {}).items()]),
+                'method': info.get('outcome', {}).get('method', 'None'),
+                'standing_ump1': info.get('officials', {}).get('umpires', ['None'])[0],
+                'standing_ump2': info.get('officials', {}).get('umpires', ['None', 'None'])[1] if len(info.get('officials', {}).get('umpires', [])) > 1 else 'None',
+                'tv_ump': info.get('officials', {}).get('tv_umpires', ['None'])[0] if 'tv_umpires' in info.get('officials', {}) else 'None',
+                'match_ref': info.get('officials', {}).get('match_referees', ['None'])[0] if 'match_referees' in info.get('officials', {}) else 'None',
+                'reserve_ump': info.get('officials', {}).get('reserve_umpires', ['None'])[0] if 'reserve_umpires' in info.get('officials', {}) else 'None'
             })
 
-            # --- Players ---
-            for team, players in info.get('players', {}).items():
-                for p in players:
-                    reg_id = info.get('registry', {}).get('people', {}).get(p, 'None')
-                    m_players.append({'match_id': match_id, 'team': team, 'player': p, 'reg_id': reg_id})
+            # --- RESTORED: Full Player Mapping ---
+            for team_name, player_list in info.get('players', {}).items():
+                for player_name in player_list:
+                    reg_id = info.get('registry', {}).get('people', {}).get(player_name, 'None')
+                    m_players.append({
+                        'match_id': match_id,
+                        'team_name': team_name,
+                        'player_name': player_name,
+                        'registry_id': reg_id
+                    })
 
-            # --- Deliveries ---
-            for i_idx, inn in enumerate(data.get('innings', [])):
-                for over in inn.get('overs', []):
-                    o_no = over['over']
-                    for b_idx, d in enumerate(over['deliveries']):
+            # --- RESTORED: Full Ball-by-Ball Data ---
+            for inn_idx, inning in enumerate(data.get('innings', [])):
+                t_name = inning['team']
+                for over_data in inning.get('overs', []):
+                    o_no = over_data['over']
+                    for b_idx, delivery in enumerate(over_data.get('deliveries', [])):
+                        runs = delivery.get('runs', {})
+                        wickets = delivery.get('wickets', [])
+                        
+                        f_name = None
+                        if wickets and 'fielders' in wickets[0]:
+                            f_name = ", ".join([fi.get('name', '') for fi in wickets[0]['fielders']])
+
                         m_deliveries.append({
-                            'match_id': match_id, 'inning': i_idx+1, 'over': o_no, 'ball': b_idx+1,
-                            'batter': d['batter'], 'bowler': d['bowler'], 'runs': d['runs']['total']
+                            'match_id': match_id,
+                            'team': t_name,
+                            'over_no': o_no,
+                            'delivery_no': b_idx + 1,
+                            'batter': delivery.get('batter'),
+                            'bowler': delivery.get('bowler'),
+                            'non_striker': delivery.get('non_striker'),
+                            'runs': runs.get('batter', 0),
+                            'extras': runs.get('extras', 0),
+                            'total': runs.get('total', 0),
+                            'wicket': 1 if wickets else 0,
+                            'kind': wickets[0].get('kind') if wickets else None,
+                            'player_out': wickets[0].get('player_out') if wickets else None,
+                            'fielder_name': f_name
                         })
 
-    # 4. Upload to Supabase
-    print("Uploading new data to Supabase...")
-    pd.DataFrame(m_info).to_sql('matches', engine, if_exists='append', index=False)
-    pd.DataFrame(m_players).to_sql('players', engine, if_exists='append', index=False)
-    pd.DataFrame(m_deliveries).to_sql('deliveries', engine, if_exists='append', index=False, chunksize=5000)
-    print("Upload complete!")
+    # 4. Upload fresh data
+    if m_info:
+        print(f"Uploading {len(m_info)} new records...")
+        pd.DataFrame(m_info).to_sql('matches', engine, if_exists='append', index=False)
+        pd.DataFrame(m_players).to_sql('players', engine, if_exists='append', index=False)
+        pd.DataFrame(m_deliveries).to_sql('deliveries', engine, if_exists='append', index=False, chunksize=5000)
+        print("Cloud Sync Successful.")
 
 if __name__ == "__main__":
-
     run_pipeline()

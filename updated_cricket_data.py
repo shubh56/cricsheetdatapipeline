@@ -127,10 +127,11 @@ def run_pipeline():
     # 4. Upload fresh data
     if m_info:
         print(f"Uploading {len(m_info)} new records...")
-        pd.DataFrame(m_info).to_sql('matches', engine, if_exists='append', index=False)
-        pd.DataFrame(m_players).to_sql('players', engine, if_exists='append', index=False)
-        pd.DataFrame(m_deliveries).to_sql('deliveries', engine, if_exists='append', index=False, chunksize=5000)
+        pd.DataFrame(m_info).to_sql('matches', engine, if_exists='replace', index=False)
+        pd.DataFrame(m_players).to_sql('players', engine, if_exists='replace', index=False)
+        pd.DataFrame(m_deliveries).to_sql('deliveries', engine, if_exists='replace', index=False, chunksize=5000)
         print("Cloud Sync Successful.")
 
 if __name__ == "__main__":
     run_pipeline()
+

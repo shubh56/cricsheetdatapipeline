@@ -22,4 +22,4 @@ jobs:
       - name: Run the script
         env:
           DB_URL: ${{ secrets.DB_URL }}
-        run: python update_cricket_data.py
+        run: python updated_cricket_data.py
